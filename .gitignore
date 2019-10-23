@@ -1,3 +1,4 @@
-.idea/
-venv/
+.idea
+__pycache__
+venv
 cinemas.log

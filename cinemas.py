@@ -3,9 +3,22 @@ import requests
 import logging
 from fake_useragent import UserAgent
 import sys
+from tqdm import tqdm
 
 AFISHA_URL = 'https://www.afisha.ru/novosibirsk/schedule_cinema/'
-KINOPOISK_URL = 'https://www.kinopoisk.ru/index.php?kp_query={}&what='
+AFISHA_PARAMS = {'view': 'list'}
+
+KINOPOISK_URL_OLD = 'https://www.kinopoisk.ru/index.php?kp_query={}&what='
+KINOPOISK_URL = 'https://www.kinopoisk.ru{}'
+KINOPOISK_PARAMS = {
+    'level': '7',
+    'from': 'forma',
+    'result': 'adv',
+    'm_act[from]': 'forma',
+    'm_act[what]': 'content',
+    'm_act[find]': '',
+    'm_act[year]': '',
+}
 
 
 def getCinemasLogger():
@@ -23,52 +36,63 @@ def get_proxies_list():
     response = requests.get(
         'http://www.freeproxy-list.ru/api/proxy?anonymity=false&token=demo',
     )
-    return response.text.split('\n')
+    proxies_list = response.text.split('\n') * 5
+    proxies_list.insert(0, '')
+    return proxies_list
 
 
-def fetch_page(url, user_agent, proxy=None):
-    try:
-        response = requests.get(
-            url,
-            headers={'User-Agent': user_agent},
-            proxies={'https': proxy},
-            timeout=30,
-        )
-        return response.text
-    except (
-            requests.exceptions.ConnectionError,
-            requests.exceptions.ConnectTimeout,
-    ):
-        return
+def fetch_page(url, user_agent, proxies_list=('',), params=None):
+    for proxy in proxies_list:
+        try:
+            response = requests.get(
+                url,
+                headers={'User-Agent': user_agent},
+                params=params,
+                proxies={'https': proxy},
+                timeout=10,
+            )
+            if 'showcaptcha' in response.url:
+                continue
+            return response.text, response.url
+        except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ConnectTimeout,
+                requests.exceptions.ReadTimeout,
+        ):
+            continue
+    return
 
 
 def parse_afisha_list(raw_html):
     movies_list = []
     soup = BeautifulSoup(raw_html, 'html.parser')
-    widget_content = soup.find('div', {'id': 'widget-content'})
-    ul = widget_content.div.div.div.ul
-    for li in ul.find_all('li'):
-        movies_list.append(li.section.h3.a.text)
+    for item_info in soup.find_all('div', {'class': 'new-list__item-info'}):
+        movies_list.append(
+            {
+                'name': item_info.h3.text,
+                'year': item_info.find(
+                    'div', {'class': 'new-list__item-status'}
+                ).text[:4],
+            }
+        )
     return movies_list
 
 
-def fetch_movie_rating(raw_html):
+def fetch_movie_rating(raw_html, url):
     soup = BeautifulSoup(raw_html, 'html.parser')
-    block_left_pad = soup.find('td', {'id': 'block_left_pad'})
-    element_most_wanted = block_left_pad.find(
-        'div',
-        {'class': 'element most_wanted'},
-    )
     try:
-        movie_rating = element_most_wanted.find(
-            'div',
-            {'class': 'rating'},
-        ).text
-    except AttributeError as e:
+        if 'index.php' in url:
+            element_most_wanted = soup.find('div',
+                                            {'class': 'element most_wanted'})
+            movie_rating = float(element_most_wanted.div.div.text)
+        else:
+            block_rating = soup.find('div', {'id': 'block_rating'})
+            movie_rating = float(block_rating.div.div.a.span.text)
+    except (AttributeError, ValueError) as e:
         logger.error(e)
-        return
+        return 0
     if not movie_rating:
-        return
+        return 0
     return movie_rating
 
 
@@ -85,7 +109,13 @@ if __name__ == '__main__':
     logger = getCinemasLogger()
     logger.info('Script started')
     user_agent = UserAgent()
-    afisha_raw_html = fetch_page(AFISHA_URL, user_agent.random)
+    proxies_list = get_proxies_list()
+    afisha_raw_html, afisha_url = fetch_page(
+        url=AFISHA_URL,
+        user_agent=user_agent.random,
+        params=AFISHA_PARAMS,
+    )
+
     if not afisha_raw_html:
         message = 'No info at Afisha.ru or connection error'
         logger.error('Script finished with "{}"'.format(message))
@@ -93,30 +123,50 @@ if __name__ == '__main__':
     else:
         logger.info("Afisha's content loaded")
 
-    movies_names_list = parse_afisha_list(afisha_raw_html)
-    if not movies_names_list:
+    movies = parse_afisha_list(afisha_raw_html)
+
+    if not movies:
         message = 'No movies today'
         logger.error('Script finished with "{}"'.format(message))
         sys.exit(message)
     else:
         logger.info('Movies names list fetched')
-    movies = [{'name': i} for i in movies_names_list]
+
+    kinopoisk_urls_list = []
+    progressbar = iter(tqdm(
+        movies,
+        desc='Getting movies info',
+        leave=False,
+    ))
     for movie in movies:
-        kinopoisk_raw_html = fetch_page(
-            KINOPOISK_URL.format(movie['name']),
-            user_agent.random,
+        next(progressbar)
+        KINOPOISK_PARAMS['m_act[find]'] = movie['name']
+        KINOPOISK_PARAMS['m_act[year]'] = movie['year']
+        kinopoisk_raw_html, kinopoisk_movie_url = fetch_page(
+            url=KINOPOISK_URL.format('/index.php'),
+            user_agent=user_agent.random,
+            proxies_list=proxies_list,
+            params=KINOPOISK_PARAMS,
         )
+
         if not kinopoisk_raw_html:
             logger.error('Error page "{}" fetching'.format(movie['name']))
             continue
         else:
             logger.info('Page "{}" fetched'.format(movie['name']))
-        movie_rating = fetch_movie_rating(kinopoisk_raw_html)
-        if not movie_rating:
-            logger.error("Error {}'s rating fetching".format(movie['name']))
+        movie['rating'] = fetch_movie_rating(
+            kinopoisk_raw_html,
+            kinopoisk_movie_url,
+        )
+        if not movie['rating']:
+            logger.error(
+                "Error {}'s rating fetching".format(movie['name']))
             movie_rating = 0
         else:
             logger.info('Movie "{}" rating fetched'.format(movie['name']))
-        movie['rating'] = float(movie_rating)
+    try:
+        next(progressbar)
+    except StopIteration:
+        pass
     output_movies_to_console(movies)
     logger.info('Script finished')
