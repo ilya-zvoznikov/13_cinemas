@@ -8,7 +8,6 @@ from tqdm import tqdm
 AFISHA_URL = 'https://www.afisha.ru/novosibirsk/schedule_cinema/'
 AFISHA_PARAMS = {'view': 'list'}
 
-KINOPOISK_URL_OLD = 'https://www.kinopoisk.ru/index.php?kp_query={}&what='
 KINOPOISK_URL = 'https://www.kinopoisk.ru{}'
 KINOPOISK_PARAMS = {
     'level': '7',
