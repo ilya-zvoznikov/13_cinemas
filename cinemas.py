@@ -131,7 +131,6 @@ if __name__ == '__main__':
     else:
         logger.info('Movies names list fetched')
 
-    kinopoisk_urls_list = []
     progressbar = iter(tqdm(
         movies,
         desc='Getting movies info',
